@@ -13,7 +13,6 @@ bin           = @["AItests"]
 
 requires "nim >= 2.2.10"
 requires "llama_leap"
-requires "linenoise"
 
 task myRun, "Run with debug flags":
-  exec "nimble run --debugger:native --stacktrace:on --linetrace:on --define:debug -d:ssl -- " & commandLineParams.join(" ")
+  exec "LC_CTYPE=ru_RU.UTF-8 nimble run --debugger:native --stacktrace:on --linetrace:on --define:debug -d:ssl -- " & commandLineParams.join(" ")
