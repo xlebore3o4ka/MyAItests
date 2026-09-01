@@ -89,13 +89,12 @@ proc systemMessage(ctx: ChatReq, msg: string, hide: static[bool] = false) =
     content: some(msg)
   ))
 
-proc assistantAnswer(ctx: ChatReq, ans: string) =
-  for line in wrapLines(ans):
-    echo "      " & line
+proc assistantMessage(ctx: ChatReq, msg: string) =
   ctx.messages.add(ChatMessage(role: "assistant", 
-    content: some(ans)
+    content: some(msg)
   ))
 
+proc assistantAnswer(ctx: ChatReq, ans: string) =
   if ans.hasChineseChar:
     ctx.systemMessage("Your response contains Chinese characters that were identified by the user as unreadable.", hide=true)
 
@@ -103,9 +102,28 @@ proc assistantAnswer(ctx: ChatReq, ans: string) =
 
     for line in wrapLines(answer):
       echo "      " & line
-    ctx.messages.add(ChatMessage(role: "assistant", 
-      content: some(answer)
-    ))
+    ctx.assistantMessage(answer)
+  else:
+    ctx.assistantMessage(ans)
+    for line in wrapLines(ans):
+      echo "      " & line
+
+const jsonPath = "allowed_directories.json"
+proc ensureAllowedDirectories() =
+  if not fileExists(jsonPath):
+    let dirs: seq[string] = @[]
+    let jsonNode = %dirs
+    writeFile(jsonPath, jsonNode.pretty)
+
+proc getAllowedDirectories(): seq[string] =
+  if fileExists(jsonPath):
+    let jsonNode = parseJson(readFile(jsonPath))
+    if jsonNode.kind == JArray:
+      for item in jsonNode:
+        if item.kind == JString:
+          result.add(item.getStr())
+  else:
+    result = @[]
 
 toolIt get_coordinates, %*{}, @[],
   "Obtain the approximate location, current time, and date at the time of the call":
@@ -128,8 +146,8 @@ toolIt change_the_parameters, %*{
   "temperature": {"type": "number", "description": "float32", "minimum": 0, "maximum": 2},
   "top_p": {"type": "number", "description": "float32", "minimum": 0, "maximum": 1}
 }, @[],
-  "Change the temperature and “top_p” parameters. Temperature affects the creativity of the response. " & 
-  "The higher the value, the more random the response; the default value is 0.5. “top_p” affects the " & 
+  "Change the temperature and \"top_p\" parameters. Temperature affects the creativity of the response. " & 
+  "The higher the value, the more random the response; the default value is 0.5. \"top_p\" affects the " & 
   "sampling based on random words. The lower the value, the less random the response and the more " & 
   "focused on the task. The default value is 0.9. Use this if the user asks you to change the " & 
   "intensity/randomness of your response or asks you to focus on the task. You can reset the " & 
@@ -147,11 +165,39 @@ toolIt end_the_dialog, %*{}, @[], "Ends the dialogue with the user. Use if the u
 
 toolIt lshw, %*{
   "args": {"type": "string", "description": "Arguments valid for the lshw command"}
-}, @[], "Find out the user’s List Hardware (before calling, warn the user about the superuser requirement)":
+}, @[], "Find out the user’s List Hardware":
   answer execProcess("sudo lshw " & (if it{"args"} != nil: it["args"].getStr() else: ""))
 
 toolIt model, %*{}, @[], "Find out the exact assistant model":
   answer "Model: qwen2.5; Parameters: 7b; Host: Ollama; Launched: user's local AI chat"
+
+toolIt directory_contents_list, %*{
+  "path": {"type": "string", "description": "The directory path to list"}
+}, @["path"], "List files and directories in a specified path. Only works for allowed directories.":
+  let targetPath = it["path"].getStr()
+  let allowed = getAllowedDirectories()
+  
+  var isAllowed = false
+  for dir in allowed:
+    if targetPath == dir or targetPath.startsWith(dir & "/"):
+      isAllowed = true
+      break
+  
+  if not isAllowed:
+    stdout.write "  * Access denied for path: " & targetPath & ". Allow? [y/N]: "
+    let response = stdin.readLine().strip().toLower()
+    if response == "y" or response == "yes":
+      let jsonPath = "allowed_directories.json"
+      var dirs = getAllowedDirectories()
+      dirs.add(targetPath)
+      let jsonNode = %dirs
+      writeFile(jsonPath, jsonNode.pretty)
+      answer "Permission granted. Directory listing:\n" & execProcess("ls -la " & targetPath)
+    else:
+      answer "Access denied: The path '", targetPath, "' is not in the allowed directories list. " &
+        "Ask the user to grant you permission."
+  else:
+    answer execProcess("ls -la " & targetPath)
 
 var ctx = ChatReq(
   model: "qwen2.5:7b",
@@ -159,17 +205,32 @@ var ctx = ChatReq(
   options: some(ModelParameters(temperature: some(0.5'f32), top_p: some(0.9'f32))),
 )
 
-ctx.systemMessage("You are a local assistant running on the user’s computer. " & 
-  "Be helpful and concise. Respond in the user’s language. Use tool calling if necessary. " & 
-  "If the user writes one of “q”, “exit”, “stop”, “!”, then end_the_dialog should be called. " & 
-  "System language: Russian. Stick to the system’s language unless the user requests otherwise. " &
-  "If your response contains Chinese characters that the user has indicated as unreadable, you will " & 
-  "see a message requesting that you rewrite the response. And you will continue to see it until your " &
-  "response is free of Chinese characters.", hide=true)
+ctx.systemMessage("You are a local assistant running on the user’s computer. " &
+  "Your creator is the person who installed, configured, and is currently interacting with you. " &
+  "The user you are talking to right now IS your creator. Always address this user as \"Создатель\". " &
+  "Never refer to them as just 'user' or 'пользователь' — always use \"Создатель\". " &
+  "Be helpful, concise, and proactive. " &
+  "Respond in the user’s language (Russian by default). " &
+  "Use tool calling when necessary. " &
+  "If the user writes one of \"q\", \"exit\", \"stop\", \"!\", call end_the_dialog. " &
+  "System language: Russian. Stick to it unless the user requests otherwise. " &
+  "Remember: you are a modifiable assistant. Your creator can change your behavior, " &
+  "personality, tools, and system prompt at any time. " &
+  "Proactively suggest improvements to yourself: " &
+  "\n- What new tools or capabilities would be useful? " &
+  "\n- How could your responses be more helpful? " &
+  "\n- What workflows could be automated? " &
+  "\n- Suggest these ideas periodically or when relevant. " &
+  "\nIf your response contains Chinese characters that the user indicates as unreadable, " &
+  "rewrite it without any Chinese characters. You will keep seeing the request until fixed. " &
+  "If the user asks you to write something in Chinese, politely decline. " &
+  "When generating a response containing Chinese characters, it will be replaced with a template.",
+  hide=true)
 
 setControlCHook proc () {.noconv.} =
   echo "\n  * Session finished"
   quit(0)
+ensureAllowedDirectories()
 
 while true:
   stdout.write "    >>> "
@@ -183,7 +244,7 @@ while true:
 
   while resp.message.tool_calls.len > 0:
     for call in resp.message.tool_calls:
-      ctx.systemMessage("Agent called: " & call.function.name & " " & $call.function.arguments)
+      ctx.systemMessage("Agent called: " & call.function.name & " " & call.function.arguments.pretty(indent = 2))
       ctx.messages.add(callTool(ctx, call))
     resp = api.chat(ctx)
 
